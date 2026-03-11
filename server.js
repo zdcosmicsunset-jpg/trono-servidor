@@ -1,88 +1,102 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const { WebcastPushConnection } = require('tiktok-live-connector'); // LIBRERÍA DE TIKTOK
 
 const app = express();
 const server = http.createServer(app);
 
-// Configuración de CORS MUY IMPORTANTE
-// Como tu APK (el celular) se conectará desde un origen diferente a Render,
-// necesitas permitir que Socket.io acepte conexiones desde cualquier lugar (*).
 const io = new Server(server, {
-    cors: {
-        origin: "*", 
-        methods: ["GET", "POST"]
-    }
+    cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 const PORT = process.env.PORT || 3000;
 
-// Estado global del juego en el servidor
+// Estado global del Rey
 let kingState = {
     username: "Cargando...",
     title: "El Soberano",
-    maxHp: 1000,
-    currentHp: 1000
+    maxHp: 2000, // Vida base para el directo
+    currentHp: 2000
 };
 
-function spawnNewKing() {
+// Modificamos la función para que el ganador se convierta en el nuevo rey
+function spawnNewKing(winnerName = null) {
     kingState = {
-        username: "Héroe_" + Math.floor(Math.random() * 9999),
-        title: Math.random() > 0.5 ? "El Valiente" : "El Terror",
-        maxHp: 1000,
-        currentHp: 1000
+        // Si hay un ganador, toma su nombre. Si no, genera uno genérico.
+        username: winnerName ? winnerName : "Héroe_" + Math.floor(Math.random() * 999),
+        title: Math.random() > 0.5 ? "El Invicto" : "El Legendario",
+        maxHp: 2000,
+        currentHp: 2000
     };
     io.emit('newKing', kingState);
 }
 
+// Función maestra para procesar cualquier tipo de daño (Likes, Regalos, etc)
+function processDamage(amount, isCritical, attackerName) {
+    if (kingState.currentHp <= 0) return; // Si ya murió, ignorar
+
+    kingState.currentHp -= amount;
+    if (kingState.currentHp < 0) kingState.currentHp = 0;
+
+    io.emit('kingHit', { damage: amount, isCritical: isCritical });
+    io.emit('updateHp', { current: kingState.currentHp });
+
+    // Si este golpe acaba de matar al rey
+    if (kingState.currentHp === 0) {
+        io.emit('kingDefeated');
+        console.log(`¡${attackerName} ha matado al rey!`);
+        // Revive en 4 segundos y corona al asesino
+        setTimeout(() => spawnNewKing(attackerName), 4000); 
+    }
+}
+
+// --- CONEXIÓN DE CLIENTES (APK) ---
 io.on('connection', (socket) => {
-    console.log('Cliente conectado:', socket.id);
-    
-    // Al conectar un nuevo cliente (tu celular o la herramienta de TikTok), le enviamos el estado
+    console.log('📱 App conectada:', socket.id);
     socket.emit('newKing', kingState);
     socket.emit('updateHp', { current: kingState.currentHp });
 
-    // Evento: Golpe normal
-    socket.on('testHit', (data) => {
-        if (kingState.currentHp <= 0) return;
-
-        kingState.currentHp -= data.dmg;
-        if (kingState.currentHp < 0) kingState.currentHp = 0;
-
-        io.emit('kingHit', { damage: data.dmg, isCritical: data.crit });
-        io.emit('updateHp', { current: kingState.currentHp });
-
-        if (kingState.currentHp === 0) {
-            io.emit('kingDefeated');
-            setTimeout(() => spawnNewKing(), 4000); // Revive tras 4 segundos
-        }
-    });
-
-    // Evento: Ataque especial masivo
-    socket.on('testSuperGift', () => {
-        if (kingState.currentHp <= 0) return;
-        
-        const dmg = 500;
-        kingState.currentHp -= dmg;
-        if (kingState.currentHp < 0) kingState.currentHp = 0;
-
-        io.emit('kingHit', { damage: dmg, isCritical: true });
-        io.emit('updateHp', { current: kingState.currentHp });
-
-        if (kingState.currentHp === 0) {
-            io.emit('kingDefeated');
-            setTimeout(() => spawnNewKing(), 4000);
-        }
-    });
-
-    socket.on('disconnect', () => {
-        console.log('Cliente desconectado:', socket.id);
-    });
+    // Controles manuales por si tocas la pantalla del celular (Para pruebas)
+    socket.on('testHit', (data) => processDamage(data.dmg, data.crit, "Dueño del Celular"));
+    socket.on('testSuperGift', () => processDamage(500, true, "Dueño del Celular"));
 });
 
-// Inicializamos el primer rey al arrancar el servidor
-spawnNewKing();
+// --- CONEXIÓN A TIKTOK LIVE ---
+// Aquí pones tu usuario de TikTok.
+let tiktokUsername = "marycorona847";
+let tiktokLiveConnection = new WebcastPushConnection(tiktokUsername);
 
+// Conectar al Live
+tiktokLiveConnection.connect().then(state => {
+    console.info(`✅ Conectado exitosamente al Live de @${state.roomInfo.owner.display_id}`);
+}).catch(err => {
+    console.error('❌ Error al conectar con TikTok:', err.message);
+});
+
+// 1. Escuchar LIKES (Tapping en la pantalla)
+tiktokLiveConnection.on('like', data => {
+    // Multiplicamos los likes por 2 de daño.
+    let totalDamage = data.likeCount * 2; 
+    processDamage(totalDamage, false, data.uniqueId);
+});
+
+// 2. Escuchar REGALOS (Rosas, etc)
+tiktokLiveConnection.on('gift', data => {
+    // Solo procesamos el regalo cuando la animación termine para no spamear la pantalla.
+    if (data.giftType === 1 && !data.repeatEnd) {
+        return; 
+    }
+    
+    // El daño será 50 por cada "moneda" que cueste el regalo.
+    let cost = data.diamondCount || 1;
+    let totalDamage = cost * 50;
+
+    processDamage(totalDamage, true, data.uniqueId); // true = golpe crítico visualmente
+});
+
+// Iniciar el servidor
+spawnNewKing();
 server.listen(PORT, () => {
-    console.log(`Servidor de eventos escuchando en el puerto ${PORT}`);
+    console.log(`🚀 Servidor escuchando en el puerto ${PORT}`);
 });
