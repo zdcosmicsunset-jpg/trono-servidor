@@ -12,7 +12,6 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 
-// Estado global del Rey
 let kingState = {
     username: "Cargando...",
     title: "El Soberano",
@@ -20,7 +19,6 @@ let kingState = {
     currentHp: 2000
 };
 
-// Función para coronar al nuevo Rey
 function spawnNewKing(winnerName = null) {
     kingState = {
         username: winnerName ? winnerName : "Héroe_" + Math.floor(Math.random() * 999),
@@ -31,9 +29,8 @@ function spawnNewKing(winnerName = null) {
     io.emit('newKing', kingState);
 }
 
-// Función maestra para procesar el daño
 function processDamage(amount, isCritical, attackerName) {
-    if (kingState.currentHp <= 0) return; // Si ya murió, ignorar
+    if (kingState.currentHp <= 0) return; 
 
     kingState.currentHp -= amount;
     if (kingState.currentHp < 0) kingState.currentHp = 0;
@@ -41,15 +38,50 @@ function processDamage(amount, isCritical, attackerName) {
     io.emit('kingHit', { damage: amount, isCritical: isCritical });
     io.emit('updateHp', { current: kingState.currentHp });
 
-    // Si este golpe acaba de matar al rey
     if (kingState.currentHp === 0) {
         io.emit('kingDefeated');
         console.log(`¡${attackerName} ha matado al rey!`);
-        
-        // Revive en 4 segundos y corona al asesino
         setTimeout(() => spawnNewKing(attackerName), 4000); 
     }
 }
+
+// --- CONEXIÓN A TIKTOK LIVE ---
+let tiktokUsername = "marycorona847";
+let tiktokLiveConnection = new WebcastPushConnection(tiktokUsername);
+let isConnectedToTikTok = false; // Control para no conectar dos veces
+
+function connectToTikTok() {
+    if (isConnectedToTikTok) return; // Si ya está conectado, no hace nada
+
+    console.log(`⏳ Intentando conectar al Live de @${tiktokUsername}...`);
+    
+    tiktokLiveConnection.connect().then(state => {
+        isConnectedToTikTok = true;
+        console.info(`✅ ¡CONECTADO! Escuchando el Live de @${tiktokUsername}`);
+    }).catch(err => {
+        console.error(`❌ El Live no ha empezado o hay error:`, err.message || err);
+        // Si falla, esperamos 5 segundos y reintentamos, PERO solo porque 
+        // sabemos que diste la orden manual de empezar.
+        setTimeout(connectToTikTok, 5000); 
+    });
+}
+
+tiktokLiveConnection.on('disconnected', () => {
+    console.warn('⚠️ Se perdió la conexión con TikTok.');
+    isConnectedToTikTok = false;
+});
+
+tiktokLiveConnection.on('like', data => {
+    let totalDamage = data.likeCount * 2; 
+    processDamage(totalDamage, false, data.uniqueId);
+});
+
+tiktokLiveConnection.on('gift', data => {
+    if (data.giftType === 1 && !data.repeatEnd) return; 
+    let cost = data.diamondCount || 1;
+    let totalDamage = cost * 50;
+    processDamage(totalDamage, true, data.uniqueId); 
+});
 
 // --- CONEXIÓN DE CLIENTES (APK) ---
 io.on('connection', (socket) => {
@@ -57,7 +89,12 @@ io.on('connection', (socket) => {
     socket.emit('newKing', kingState);
     socket.emit('updateHp', { current: kingState.currentHp });
 
-    // Controles manuales
+    // --- NUEVO: RECIBE LA ORDEN DE ENCENDER TIKTOK ---
+    socket.on('iniciarConexionTikTok', () => {
+        console.log("📱 El celular dio la orden de conectar a TikTok!");
+        connectToTikTok();
+    });
+
     socket.on('testHit', (data) => {
         processDamage(data.dmg, data.crit, data.attacker || "@marycorona847");
     });
@@ -66,38 +103,7 @@ io.on('connection', (socket) => {
     });
 });
 
-// --- CONEXIÓN A TIKTOK LIVE ---
-let tiktokUsername = "marycorona847";
-let tiktokLiveConnection = new WebcastPushConnection(tiktokUsername);
-
-// Conectar al Live
-tiktokLiveConnection.connect().then(state => {
-    // CORRECCIÓN: Ya no leemos 'state.roomInfo.owner.display_id' para evitar el error.
-    // Usamos directamente tu usuario para el mensaje de éxito.
-    console.info(`✅ Conectado exitosamente al Live de @${tiktokUsername}`);
-}).catch(err => {
-    console.error('❌ Error al conectar con TikTok:', err.message || err);
-});
-
-// 1. Escuchar LIKES (Tapping en la pantalla)
-tiktokLiveConnection.on('like', data => {
-    let totalDamage = data.likeCount * 2; 
-    processDamage(totalDamage, false, data.uniqueId);
-});
-
-// 2. Escuchar REGALOS (Rosas, etc)
-tiktokLiveConnection.on('gift', data => {
-    if (data.giftType === 1 && !data.repeatEnd) {
-        return; 
-    }
-    
-    let cost = data.diamondCount || 1;
-    let totalDamage = cost * 50;
-    processDamage(totalDamage, true, data.uniqueId); 
-});
-
-// Iniciar el servidor
 spawnNewKing();
 server.listen(PORT, () => {
-    console.log(`🚀 Servidor escuchando en el puerto ${PORT}`);
+    console.log(`🚀 Servidor encendido y esperando la señal del celular...`);
 });
